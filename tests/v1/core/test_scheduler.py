@@ -4183,6 +4183,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.processed_step_seq = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -7040,6 +7041,7 @@ def _seed_hybrid_prefix(
         fill.num_computed_tokens += block_size
         fa_ids, group_mamba_ids = manager.get_block_ids(fill.request_id)
         mamba_ids.append(group_mamba_ids[i])
+    manager.commit_step(0)
     manager.free(fill)
     return fa_ids, mamba_ids
 
@@ -7544,3 +7546,114 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+@pytest.mark.parametrize("policy", ["priority", "fcfs"])
+def test_mamba_withdrawn_checkpoint_is_not_reused(policy: str):
+    """Exercise cold scheduling and preemption without seeding cached metadata."""
+    num_blocks = 16
+    init_none_hash(sha256)
+    original = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=64,
+        max_model_len=512,
+        long_prefill_token_threshold=16,
+        enable_prefix_caching=True,
+        scheduling_policy=policy,
+        num_blocks=num_blocks,
+    )
+    original.vllm_config.cache_config.mamba_cache_mode = "align"
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    scheduler = Scheduler(
+        original.vllm_config,
+        config,
+        original.structured_output_manager,
+        block_size=16,
+        hash_block_size=16,
+    )
+
+    def request(name, tokens, offset=0, max_tokens=128):
+        return Request(
+            request_id=name,
+            prompt_token_ids=list(range(offset, offset + tokens)),
+            sampling_params=SamplingParams(max_tokens=max_tokens, ignore_eos=True),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(16, sha256),
+        )
+
+    def complete(step):
+        ids = list(step.num_scheduled_tokens)
+        scheduler.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=ids,
+                req_id_to_index={rid: i for i, rid in enumerate(ids)},
+                sampled_token_ids=[
+                    [] if scheduler.requests[rid].is_prefill_chunk else [1001]
+                    for rid in ids
+                ],
+            ),
+        )
+
+    owner = request("owner", 65, max_tokens=1)
+    owner.resumable = True
+    scheduler.add_request(owner)
+    complete(scheduler.schedule())
+    low = request("low", 49)
+    high = request("high", 33, offset=1000)
+    low.priority = 10
+    high.priority = 0
+    scheduler.add_request(low)
+    initial = scheduler.schedule()
+    complete(initial)
+    assert owner.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    completed = {"low": initial.num_scheduled_tokens.get("low", 0), "high": 0}
+    for index in range(12):
+        if index == 0:
+            scheduler.add_request(high)
+        step = scheduler.schedule()
+        ids = list(step.num_scheduled_tokens)
+        complete(step)
+        for rid in ids:
+            completed[rid] += step.num_scheduled_tokens[rid]
+        if "low" in step.preempted_req_ids or (policy == "fcfs" and index == 1):
+            consumer = request("consumer", 49)
+            manager = scheduler.kv_cache_manager
+            manager.new_step_starts(scheduler.sched_step_seq + 1)
+            hits, tokens, _ = manager.get_computed_blocks(consumer)
+            accepted = (
+                manager.allocate_slots(
+                    consumer,
+                    1,
+                    num_new_computed_tokens=tokens,
+                    new_computed_blocks=hits,
+                )
+                is not None
+            )
+            # Priority preemption withdraws a tentative 48-token checkpoint;
+            # only the previously executed 32-token checkpoint is reusable.
+            assert completed["low"] == (32 if policy == "priority" else 48)
+            assert tokens == completed["low"]
+            assert accepted
+            return
+    pytest.fail("Expected preemption or the completed FCFS control")

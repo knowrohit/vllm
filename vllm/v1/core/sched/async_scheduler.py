@@ -73,6 +73,8 @@ class AsyncScheduler(Scheduler):
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
             self.kv_cache_manager.cache_blocks(
-                request, request.num_computed_tokens - request.num_output_placeholders
+                request,
+                request.num_computed_tokens - request.num_output_placeholders,
+                committed=True,
             )
         return new_token_ids, stopped

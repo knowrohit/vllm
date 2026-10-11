@@ -294,7 +294,8 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
 
     step(0, first_chunk_blocks * block_size)
     speculative_blocks = manager.req_to_blocks["r"][-num_speculative_blocks:]
-    manager.new_step_starts()
+    manager.commit_step(0)
+    manager.new_step_starts(1)
     step(first_chunk_blocks * block_size, prompt_tokens)
 
     checkpoint_position, checkpoint_idx = manager._checkpoints["r"]

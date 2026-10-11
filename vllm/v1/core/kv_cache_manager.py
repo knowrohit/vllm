@@ -809,17 +809,22 @@ class KVCacheManager:
 
         return cached_tokens or 0
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_computed_tokens: int, *, committed: bool = False
+    ) -> None:
         """Cache the blocks for the request, if enabled.
 
         Args:
             request: The request to cache the blocks.
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
+            committed: Whether worker execution or a KV transfer has completed.
 
         """
         if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+            self.coordinator.cache_blocks(
+                request, num_computed_tokens, committed=committed
+            )
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]
@@ -947,6 +952,17 @@ class KVCacheManager:
             offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
-    def new_step_starts(self) -> None:
-        """Notify the coordinator that a new step is starting."""
-        self.coordinator.new_step_starts()
+    def new_step_starts(self, step_seq: int) -> None:
+        """Notify the coordinator that a new step is starting.
+
+        step_seq is the fence seq the step scheduled this pass will get
+        (scheduler sched_step_seq + 1); mamba state hashes published this
+        pass stay guarded until the commit fence reaches it.
+        """
+        self.coordinator.new_step_starts(step_seq)
+
+    def commit_step(self, step_seq: int) -> None:
+        """Mark the executed step with fence seq step_seq as committed: every
+        GPU write it enqueued has landed, so mamba state hashes published
+        for it become safe to hit."""
+        self.coordinator.commit_step(step_seq)

@@ -11,7 +11,11 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from tests.v1.core.test_prefix_caching import (
+    complete_kv_cache_step,
+    make_kv_cache_manager,
+    make_request,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
@@ -202,11 +206,11 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
             scheduler, producer, prompt_tokens - producer.num_computed_tokens
         )
         assert scheduled > 0
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
         assert manager.allocate_slots(producer, scheduled) is not None
         producer.num_computed_tokens += scheduled
+    complete_kv_cache_step(manager)
     manager.free(producer)
-    manager.new_step_starts()
 
     replay = make_request(
         "replay", list(range(prompt_tokens + extension_tokens)), hash_block_size, sha256
@@ -400,8 +404,8 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert num_computed == 0
     blocks = manager.allocate_slots(req0, 6, num_computed, computed_blocks)
     assert blocks is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_mamba_block = manager.block_pool.get_cached_block(
@@ -597,8 +601,8 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     owner = make_request("owner", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(owner)
     assert manager.allocate_slots(owner, 6, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(owner)
-    manager.new_step_starts()
 
     partial_hash = owner.block_hashes[2]
     partial_block = manager.block_pool.get_cached_block(partial_hash, [1])
@@ -622,7 +626,7 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     manager.block_pool.free_blocks(retained)
 
     replay.num_computed_tokens = 8
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     final_blocks = manager.allocate_slots(replay, 6)
     assert final_blocks is not None
 
@@ -669,6 +673,7 @@ def test_internal_checkpoint_uses_partial_hash_lifecycle():
         request.request_id: [(1, checkpoint_block.block_id, 112)]
     }
 
+    complete_kv_cache_step(manager)
     manager.free(request)
     replay = make_request("replay", list(range(120)), hash_block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(replay)
@@ -724,7 +729,7 @@ def test_internal_checkpoint_publication_respects_retention(
         assert manager.block_pool.get_cached_block(retained_hash, [1]) is not None
 
     request.num_computed_tokens = 128
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     # The final checkpoint is reusable regardless of the retention interval.
     assert manager.allocate_slots(request, 112) is not None
@@ -801,6 +806,7 @@ def test_prompt_end_checkpoint_survives_block_aligned_cache_count(prompt_len):
     assert hit is not None
     assert hit[0].block_hash_num_tokens == checkpoint_position
 
+    complete_kv_cache_step(manager)
     manager.free(request)
     replay = make_request("replay", list(range(prompt_len)), hash_block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(replay)
@@ -839,7 +845,7 @@ def test_intermediate_chunk_checkpoint_reserved_only_under_dense_retention(
     assert allocated == 128 // hash_block_size + 1 + int(reserved)
 
     request.num_computed_tokens = 128
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     # Final chunk: the prefill-end checkpoint at 224 is reserved either way.
     assert manager.allocate_slots(request, 112) is not None
     assert mamba_manager._checkpoints[request.request_id][0] == 224
@@ -1297,8 +1303,8 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     producer = make_request("producer", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
     blocks, num_computed, _ = manager.get_computed_blocks(producer)
     assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(producer)
-    manager.new_step_starts()
 
     consumer = make_request(
         "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
@@ -1352,8 +1358,8 @@ def test_truncate_computed_blocks_allows_short_mamba_group_only():
     producer = make_request("producer", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
     blocks, num_computed, _ = manager.get_computed_blocks(producer)
     assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(producer)
-    manager.new_step_starts()
 
     consumer = make_request(
         "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
@@ -1432,7 +1438,7 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     owner_copies, _ = manager.take_kv_cache_block_copies()
     cow_copy = next(c for c in owner_copies if c.src_block_id == partial_mamba_block_id)
     moved_block_id = cow_copy.dst_block_id
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     req1 = make_request("1", [0, 0, 1, 1, 2, 2, 4, 4], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
@@ -1456,7 +1462,8 @@ def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     )
 
 
-def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
+@pytest.mark.parametrize("withdrawn", [False, True])
+def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit(withdrawn):
     """The owner's move re-arms the same-step guard: the moved entry is
     filled by this step's copy, and chained same-step copies read stale
     sources, so a request hitting it in the move step must be deferred."""
@@ -1497,7 +1504,7 @@ def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     # The owning request continues decoding: the partial entry moves to a
     # private copy in this step.
@@ -1511,8 +1518,15 @@ def test_hybrid_mamba_moved_partial_entry_defers_same_step_hit():
     assert num_computed == 6
     assert manager.allocate_slots(req1, 2, num_computed, computed_blocks) is None
 
-    # Next step the moved entry is consumable.
-    manager.new_step_starts()
+    # Scheduling again does not establish that the queued copy completed.
+    manager.new_step_starts(2)
+    assert manager.allocate_slots(req1, 2, num_computed, computed_blocks) is None
+    if withdrawn:
+        manager.free(req0)
+        # The CoW target is outside req0's block table, but must be withdrawn.
+        assert manager.block_pool.get_cached_block(req0.block_hashes[2], [1]) is None
+        return
+    manager.commit_step(1)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
     assert num_computed == 6
     assert manager.allocate_slots(req1, 2, num_computed, computed_blocks) is not None
@@ -1556,8 +1570,8 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     partial_full_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_full_block = manager.block_pool.get_cached_block(
@@ -1630,8 +1644,8 @@ def test_hybrid_partial_hit_cow_target_starts_uncached():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     partial_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_full_block = manager.block_pool.get_cached_block(
@@ -1956,10 +1970,10 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
     req0.num_computed_tokens = 4
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 2) is not None
     req0.num_computed_tokens = 6
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     # A longer request with eagle: full attention drops the partial tail, so
     # the joint hit must fall back to the block boundary the FA blocks cover.
@@ -2056,10 +2070,10 @@ def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
     assert num_computed == 0
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
     req0.num_computed_tokens = 6
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 3) is not None
     req0.num_computed_tokens = 9
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     partial_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_block = manager.block_pool.get_cached_block(
@@ -2125,11 +2139,11 @@ def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary():
     assert num_computed == 0
     assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
     req0.num_computed_tokens = 4
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 5) is not None
     req0.num_computed_tokens = 9
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     # The reachable state (4) is retained; the unreachable one (8) is not.
     assert (
@@ -2200,11 +2214,11 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
         is not None
     )
     request.num_computed_tokens = mamba_block_size
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(request, len(tokens) - mamba_block_size) is not None
     request.num_computed_tokens = len(tokens)
+    complete_kv_cache_step(manager)
     manager.free(request)
-    manager.new_step_starts()
 
     cached_request = make_request(
         "1", tokens + [len(tokens), len(tokens) + 1], hash_block_size, sha256
@@ -2329,8 +2343,8 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
     req0 = make_request("0", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     req1 = make_request("1", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(req1)
@@ -2392,8 +2406,8 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         manager.allocate_slots(req0, len(shared_prefix), num_computed, computed_blocks)
         is not None
     )
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     req1 = make_request("1", shared_prefix + [12] * 64, hash_block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(req1)
@@ -2415,8 +2429,8 @@ def test_hybrid_partial_hash_hit_uses_cow_under_dcp(dcp_world_size: int):
     req0 = make_request("dcp-owner", [0, 0, 1, 1, 2, 2, 3], 2, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     partial_hash = req0.block_hashes[2]
     partial_full_block = manager.block_pool.get_cached_block(partial_hash, [0])
@@ -2467,8 +2481,8 @@ def test_dcp_partial_hit_resumes_on_replicated_mamba_snapshot(
     req0 = make_request("snapshot-owner", prefix + [12], block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 12, num_computed, computed_blocks) is not None
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
 
     req1 = make_request(
         "snapshot-replay", prefix + list(range(12, 16)), block_size, sha256
@@ -2504,7 +2518,7 @@ def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
     req0 = make_request("joint-owner", prefix + [12], block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     replay_tokens = prefix + list(range(12, 16))
     req1 = make_request("joint-before", replay_tokens, block_size, sha256)
@@ -2514,7 +2528,7 @@ def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
 
     req0.num_computed_tokens = 8
     assert manager.allocate_slots(req0, 4) is not None
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     req2 = make_request("joint-after", replay_tokens, block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req2)
@@ -2536,10 +2550,10 @@ def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
     req0.num_computed_tokens = 4
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 2) is not None
     req0.num_computed_tokens = 6
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     req1 = make_request("eagle-replay", [7] * 6 + [9] * 2, 2, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
@@ -2604,7 +2618,7 @@ def test_retention_snapshots_handed_off_with_exact_block_ids():
     assert block_id == mamba_blocks[1].block_id
 
     req0.num_computed_tokens = 8
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 8) is not None
 
     offloads = drain_boundary_state_offloads(manager)
@@ -2644,7 +2658,7 @@ def test_snapshot_handoff_dense_default_retention():
     assert block_id == mamba_blocks[1].block_id
 
     req0.num_computed_tokens = 8
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(req0, 8) is not None
     ((group_id, block_id2, boundary2),) = drain_boundary_state_offloads(manager)["0"]
     assert group_id == 1
@@ -2657,7 +2671,7 @@ def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
     boundary-state hand-offs offered (and claimed) at each step."""
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
     for step in range(num_chunks):
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
         req.num_computed_tokens = step * chunk_size
         if step == 0:
             allocated = manager.allocate_slots(
@@ -2741,15 +2755,15 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     # prefill: its committed boundary is offered even though it is past the
     # prompt, matching what full attention saves for the same range.
     for i in range(block_size):
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
         req0.num_computed_tokens = prompt_len + i
         req0.append_output_token_ids([1])
         assert manager.allocate_slots(req0, 1) is not None
         drain_boundary_state_offloads(manager)
     assert req0.num_tokens == 2 * block_size
 
+    complete_kv_cache_step(manager)
     manager.free(req0)
-    manager.new_step_starts()
     req0.num_computed_tokens = 0
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, req0.num_tokens - num_computed, num_computed)
@@ -2780,7 +2794,7 @@ def test_prompt_end_checkpoint_survives_sparse_retention_with_coarse_hash():
     computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
     assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
     request.num_computed_tokens = 128
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
     assert manager.allocate_slots(request, 112) is not None
 
     end_hash = request.block_hashes[224 // block_size - 1]
@@ -2857,5 +2871,5 @@ def test_checkpoint_reservation_matches_worker(
         elif offsets[0]:
             assert mamba_manager.req_to_blocks[request.request_id][cols[0]].is_null
         request.num_computed_tokens = end
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
         start = end

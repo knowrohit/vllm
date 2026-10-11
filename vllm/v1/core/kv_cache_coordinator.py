@@ -348,7 +348,9 @@ class KVCacheCoordinator(ABC):
         # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_computed_tokens: int, *, committed: bool = False
+    ) -> None:
         """Cache the blocks for the request.
 
         Args:
@@ -356,11 +358,21 @@ class KVCacheCoordinator(ABC):
             num_computed_tokens: The total number of tokens
                 that need to be cached
                 (including tokens that are already cached).
+            committed: Whether worker execution or a KV transfer has completed.
 
         """
         boundaries = self.get_replay_boundaries(request)
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
+                continue
+            if committed and isinstance(manager, MambaManager):
+                manager.cache_blocks(
+                    request,
+                    self.get_num_cacheable_tokens(num_computed_tokens, group_id),
+                    retention_interval=self.retention_interval,
+                    replay_boundaries=boundaries,
+                    committed=True,
+                )
                 continue
             manager.cache_blocks(
                 request,
@@ -477,10 +489,16 @@ class KVCacheCoordinator(ABC):
         sparse-retention group has not cached yet; 0 unless hybrid)."""
         pass
 
-    def new_step_starts(self) -> None:
+    def new_step_starts(self, step_seq: int = 0) -> None:
         """Notify each manager that a new step is starting."""
         for manager in self.single_type_managers:
-            manager.new_step_starts()
+            manager.new_step_starts(step_seq)
+
+    def commit_step(self, step_seq: int = 0) -> None:
+        """Notify each manager that a scheduled step has committed (its GPU
+        writes have landed)."""
+        for manager in self.single_type_managers:
+            manager.commit_step(step_seq)
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):

@@ -18,6 +18,7 @@ import pytest
 
 from tests.v1.core.test_prefix_caching import (
     _make_hybrid_kv_cache_config,
+    complete_kv_cache_step,
     make_kv_cache_manager,
     make_request,
 )
@@ -118,7 +119,7 @@ def _prefill(manager, stub, request, *, external=0) -> list[int]:
         _, retained = manager.take_kv_cache_block_copies()
         if retained:
             manager.block_pool.free_blocks(retained)
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
         first = False
     return ends
 

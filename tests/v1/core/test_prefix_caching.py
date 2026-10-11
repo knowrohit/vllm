@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -140,6 +141,20 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
     if kv_cache_config.hisparse_host_num_blocks is not None:
         get_hisparse_coordinator(manager)
     return manager
+
+
+def complete_kv_cache_step(manager: KVCacheManager) -> None:
+    """Simulate worker completion before starting the next allocation step."""
+    step_seq = max(
+        (
+            m._sched_step_seq
+            for m in manager.coordinator.single_type_managers
+            if isinstance(m, MambaManager)
+        ),
+        default=0,
+    )
+    manager.commit_step(step_seq)
+    manager.new_step_starts(step_seq + 1)
 
 
 def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
@@ -1202,6 +1217,122 @@ def test_hisparse_events_report_host_and_device_placement():
     assert removed.group_idx == 0
 
 
+@pytest.fixture
+def mamba_checkpoint_manager():
+    return make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=16,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+
+
+@pytest.mark.parametrize("outcome", ["pending", "withdrawn", "completed"])
+def test_mamba_checkpoint_reuse_requires_producer_completion(
+    mamba_checkpoint_manager, outcome
+):
+    """An unfinished checkpoint must not hide or replace a completed one."""
+    manager = mamba_checkpoint_manager
+    producer = make_request("producer", list(range(49)), 16, sha256)
+    for step in (1, 2, 3):
+        manager.new_step_starts(step)
+        assert manager.allocate_slots(producer, 16) is not None
+        if step < 3 or outcome == "completed":
+            producer.num_computed_tokens = step * 16
+            manager.commit_step(step)
+
+    if outcome != "pending":
+        manager.free(producer)
+    manager.new_step_starts(4)
+    consumer = make_request("consumer", list(range(49)), 16, sha256)
+    hits, cached_tokens, _ = manager.get_computed_blocks(consumer)
+    assert cached_tokens == (32 if outcome == "withdrawn" else 48)
+    slots = manager.allocate_slots(
+        consumer, 1, num_new_computed_tokens=cached_tokens, new_computed_blocks=hits
+    )
+    assert (slots is None) == (outcome == "pending")
+
+
+def test_mamba_pending_duplicate_does_not_guard_committed_copy(
+    mamba_checkpoint_manager,
+):
+    """Guards belong to physical copies, even when their prefix hashes match."""
+    manager = mamba_checkpoint_manager
+    first = make_request("first", list(range(49)), 16, sha256)
+    second = make_request("second", list(range(49)), 16, sha256)
+    manager.new_step_starts(1)
+    assert manager.allocate_slots(first, 32) is not None
+    manager.commit_step(1)
+    committed_id = manager.get_blocks(first.request_id).blocks[0][-1].block_id
+    manager.new_step_starts(2)
+    assert manager.allocate_slots(second, 32) is not None
+
+    consumer = make_request("consumer", list(range(49)), 16, sha256)
+    hits, cached, _ = manager.get_computed_blocks(consumer)
+    assert cached == 32
+    assert hits.blocks[0][-1].block_id == committed_id
+    assert (
+        manager.allocate_slots(
+            consumer, 1, num_new_computed_tokens=cached, new_computed_blocks=hits
+        )
+        is not None
+    )
+
+    manager.free(first)
+    manager.block_pool.evict_blocks({committed_id})
+    retry = make_request("retry", list(range(49)), 16, sha256)
+    hits, cached, _ = manager.get_computed_blocks(retry)
+    assert cached == 32
+    assert (
+        manager.allocate_slots(
+            retry, 1, num_new_computed_tokens=cached, new_computed_blocks=hits
+        )
+        is None
+    )
+    manager.commit_step(2)
+    assert (
+        manager.allocate_slots(
+            retry, 1, num_new_computed_tokens=cached, new_computed_blocks=hits
+        )
+        is not None
+    )
+
+
+def test_mamba_worker_confirmed_publication_survives_free(mamba_checkpoint_manager):
+    """A completed decode/transfer must not inherit a later batch's fence."""
+    manager = mamba_checkpoint_manager
+    producer = make_request("producer", list(range(49)), 16, sha256)
+    manager.new_step_starts(1)
+    assert manager.allocate_slots(producer, 32, delay_cache_blocks=True) is not None
+    manager.new_step_starts(2)
+    manager.commit_step(1)
+    manager.cache_blocks(producer, 32, committed=True)
+    manager.free(producer)
+    consumer = make_request("consumer", list(range(49)), 16, sha256)
+    hits, cached, _ = manager.get_computed_blocks(consumer)
+    assert cached == 32
+    assert (
+        manager.allocate_slots(
+            consumer, 1, num_new_computed_tokens=cached, new_computed_blocks=hits
+        )
+        is not None
+    )
+
+
 def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     """Draining unused connector offers must not retain old recurrent states."""
     manager = make_kv_cache_manager(
@@ -1234,7 +1365,7 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
         assert boundary == end
         old_blocks.append(manager.block_pool.blocks[block_id])
         manager.remove_skipped_blocks(request.request_id, end, 64)
-        manager.new_step_starts()
+        complete_kv_cache_step(manager)
 
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
@@ -2434,7 +2565,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
-    manager.new_step_starts()
+    complete_kv_cache_step(manager)
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
@@ -5164,6 +5295,7 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
             assert cached is not None, f"mamba hash {i} should be cached"
         else:
             assert cached is None, f"mamba hash {i} should not be cached"
+    complete_kv_cache_step(manager)
     manager.free(req0)
 
     # The identical resend must reuse the retained checkpoint, not miss to zero.
