@@ -4,6 +4,7 @@
 
 import pytest
 import requests
+import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
@@ -30,6 +31,69 @@ input_tokens = [
     115774,
     2,
 ]
+
+
+@pytest.fixture(scope="module")
+def causal_server():
+    args = [
+        "--runner",
+        "pooling",
+        "--convert",
+        "embed",
+        "--pooler-config.task",
+        "token_embed",
+        "--max-model-len",
+        "1024",
+        "--enforce-eager",
+        "--enable-prefix-caching",
+    ]
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_opt_in_prefix_cache_returns_aligned_suffix(causal_server, chat):
+    text = "A shared prefix for pooling requests. " * 40 + "Read this tail."
+    body = {"model": "Qwen/Qwen3-0.6B", "task": "token_embed"}
+    if chat:
+        body["messages"] = [{"role": "user", "content": text}]
+    else:
+        body["input"] = text
+
+    def encode(**options):
+        response = requests.post(
+            causal_server.url_for("pooling"), json={**body, **options}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"][0]
+
+    full = encode()
+    partial = encode(skip_reading_prefix_cache=False)
+    default = encode()
+    offset = partial["num_cached_tokens"]
+    assert 0 < offset < len(full["data"])
+    assert full["num_cached_tokens"] == default["num_cached_tokens"] == 0
+    torch.testing.assert_close(
+        torch.tensor(partial["data"]),
+        torch.tensor(full["data"])[offset:],
+        atol=2e-2,
+        rtol=2e-2,
+    )
+    assert len(default["data"]) == len(full["data"])
+
+
+def test_partial_outputs_reject_bytes_only(causal_server):
+    response = requests.post(
+        causal_server.url_for("pooling"),
+        json={
+            "input": "hello",
+            "task": "token_embed",
+            "skip_reading_prefix_cache": False,
+            "encoding_format": "bytes_only",
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "require output metadata" in response.json()["error"]["message"]
 
 
 @pytest.fixture(scope="module")

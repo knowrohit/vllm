@@ -157,6 +157,7 @@ class ServingPooling(PoolingBaseServing):
             item = PoolingResponseData(
                 index=idx,
                 data=encode_fn(final_res),
+                num_cached_tokens=final_res.num_cached_tokens,
             )
 
             items.append(item)

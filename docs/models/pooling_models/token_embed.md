@@ -131,6 +131,54 @@ print(f"Score: {score}")
 
 Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_embed"`.
 
+## Prefix-cache reads and partial outputs
+
+By default, `token_embed` and `token_classify` skip prefix-cache reads so that
+outputs cover the full prompt. The KV cache does not store the final hidden
+states needed to reconstruct token outputs for a cached prefix.
+
+For causal models with prefix caching enabled, applications that can consume
+only the uncached suffix may explicitly set `skip_reading_prefix_cache=False`:
+
+```python
+from vllm import PoolingParams
+
+(output,) = llm.encode(
+    prompt,
+    pooling_task="token_embed",
+    pooling_params=PoolingParams(skip_reading_prefix_cache=False),
+)
+offset = output.num_cached_tokens
+# With ALL pooling, row i corresponds to prompt token offset + i.
+suffix = output.outputs.data
+suffix_token_ids = output.prompt_token_ids[offset:]
+```
+
+The same option is available on `/pooling` for both text and chat requests:
+
+```json
+{
+  "model": "your-causal-pooling-model",
+  "input": "A shared prefix followed by request-specific text",
+  "task": "token_embed",
+  "skip_reading_prefix_cache": false,
+  "encoding_format": "float"
+}
+```
+
+Each response item contains `num_cached_tokens`, the number of leading prompt
+tokens omitted from its output. `bytes` encoding includes this field in each
+item's metadata; `bytes_only` is rejected with this option because it carries
+no alignment metadata. Offsets refer to the actual tokenized prompt, including
+special tokens and chat-template tokens, rather than positions in the input
+string. Cache hits depend on token-identical prefixes and cache alignment, so
+the offset may differ across requests or be zero.
+
+For STEP pooling, apply the step-tag filter to the uncached token-ID suffix;
+only matching positions in that suffix produce rows. Applications needing
+outputs for cached prefix positions must retain or recompute those outputs,
+or keep the default full-output behavior.
+
 ## More examples
 
 More examples can be found here: [examples/pooling/token_embed](../../../examples/pooling/token_embed)

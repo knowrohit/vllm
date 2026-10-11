@@ -48,6 +48,11 @@ class PoolingParams(
             `None` uses the pooler's default, which is `True` in most cases.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
+        skip_reading_prefix_cache: None uses the task default. For token_embed
+            and token_classify, False allows prefix reuse and returns only the
+            uncached suffix. The output's num_cached_tokens gives its starting
+            prompt position before any STEP filtering. KV caches do not store
+            final hidden states, so cached token outputs cannot be reconstructed.
 
     """
 
@@ -125,9 +130,8 @@ class PoolingParams(
                 setattr(self, k, getattr(pooler_config, k))
 
         if self.skip_reading_prefix_cache is None:
-            # If prefix caching is enabled,
-            # the output of all pooling may less than n_prompt_tokens,
-            # we need to skip reading cache at this request.
+            # Tokenwise tasks need every hidden state by default. An explicit
+            # False opts into omitting the cached prefix from their outputs.
             if self.task in ["token_embed", "token_classify"]:
                 self.skip_reading_prefix_cache = True
             else:

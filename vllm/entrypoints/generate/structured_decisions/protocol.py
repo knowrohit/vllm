@@ -56,6 +56,11 @@ class StructuredDecisionRequest(OpenAIBaseModel):
 class DecisionUsage(OpenAIBaseModel):
     input_tokens: int
     output_tokens: int
+    cached_tokens: int = Field(
+        default=0,
+        ge=0,
+        description="Sum of prompt tokens reused across the question reads.",
+    )
 
 
 class QuestionDiagnostics(OpenAIBaseModel):
@@ -65,6 +70,11 @@ class QuestionDiagnostics(OpenAIBaseModel):
         "that are not labels."
     )
     argmax_is_label: bool
+    cached_tokens: int = Field(
+        default=0,
+        ge=0,
+        description="Prompt tokens reused from the prefix cache for this question.",
+    )
 
 
 class StructuredDecisionResponse(OpenAIBaseModel):

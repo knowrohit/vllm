@@ -115,7 +115,9 @@ class ServingStructuredDecisions(BaseServing):
         for q, read in zip(questions, reads):
             answers[q.id] = q.type.answer(q, read.probs, read.label_mass)
             diagnostics[q.id] = QuestionDiagnostics(
-                label_mass=read.label_mass, argmax_is_label=read.argmax_is_label
+                label_mass=read.label_mass,
+                argmax_is_label=read.argmax_is_label,
+                cached_tokens=read.cached_tokens,
             )
         return StructuredDecisionResponse(
             id=request_id,
@@ -124,6 +126,7 @@ class ServingStructuredDecisions(BaseServing):
             usage=DecisionUsage(
                 input_tokens=sum(r.input_tokens for r in reads),
                 output_tokens=sum(r.output_tokens for r in reads),
+                cached_tokens=sum(r.cached_tokens for r in reads),
             ),
             diagnostics=diagnostics,
         )

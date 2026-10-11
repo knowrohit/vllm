@@ -3,6 +3,7 @@
 
 import pytest
 import requests
+import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
@@ -23,10 +24,38 @@ def server():
         DTYPE,
         "--pooler-config.task",
         "token_classify",
+        "--enable-prefix-caching",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+def test_opt_in_prefix_cache_returns_aligned_classifications(server):
+    body = {
+        "model": MODEL_NAME,
+        "input": "This product was excellent. " * 40 + "Read this tail.",
+        "task": "token_classify",
+    }
+
+    def encode(**options):
+        response = requests.post(server.url_for("pooling"), json={**body, **options})
+        assert response.status_code == 200, response.text
+        return response.json()["data"][0]
+
+    full = encode()
+    partial = encode(skip_reading_prefix_cache=False)
+    default = encode()
+    offset = partial["num_cached_tokens"]
+    assert 0 < offset < len(full["data"])
+    assert full["num_cached_tokens"] == default["num_cached_tokens"] == 0
+    torch.testing.assert_close(
+        torch.tensor(partial["data"]),
+        torch.tensor(full["data"])[offset:],
+        atol=1e-3,
+        rtol=1e-3,
+    )
+    assert len(default["data"]) == len(full["data"])
 
 
 @pytest.mark.asyncio

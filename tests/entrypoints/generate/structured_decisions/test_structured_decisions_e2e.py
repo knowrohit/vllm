@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from uuid import uuid4
+
 import pytest
 import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 
@@ -34,6 +37,41 @@ def choice(instructions, *names):
         "instructions": instructions,
         "criteria": dict.fromkeys(names),
     }
+
+
+def test_repeated_decision_reports_prefix_cache_reuse(server):
+    metrics = requests.get(server.url_for("metrics"))
+    metrics.raise_for_status()
+    cache_configs = [
+        sample.labels
+        for family in text_string_to_metric_families(metrics.text)
+        for sample in family.samples
+        if sample.name == "vllm:cache_config_info"
+    ]
+    assert cache_configs
+    for config in cache_configs:
+        assert int(config["hash_block_size"]) > 0
+        assert int(config["cache_hit_alignment_tokens"]) > 0
+    body = {
+        "model": MODEL_NAME,
+        "state": "The billing team handles payments. " * 40,
+        "questions": {"team": choice("Which team?", "billing", "shipping")},
+        "chat_template_kwargs": {"enable_thinking": False},
+        "cache_salt": str(uuid4()),
+    }
+    cold = post(server, body)
+    warm = post(server, body)
+    isolated = post(server, {**body, "cache_salt": str(uuid4())})
+    for response in (cold, warm, isolated):
+        assert response.status_code == 200, response.text
+    assert cold.json()["usage"]["cached_tokens"] == 0
+    warm_body = warm.json()
+    assert warm_body["usage"]["cached_tokens"] > 0
+    assert (
+        warm_body["usage"]["cached_tokens"]
+        == (warm_body["diagnostics"]["team"]["cached_tokens"])
+    )
+    assert isolated.json()["usage"]["cached_tokens"] == 0
 
 
 COPY = {

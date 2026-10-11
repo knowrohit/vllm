@@ -11,7 +11,11 @@ from vllm import PoolingParams
 from vllm.config import ModelConfig, PoolerConfig
 from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
-from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+from vllm.entrypoints.pooling.pooling.protocol import (
+    PoolingChatRequest,
+    PoolingCompletionRequest,
+    PoolingRequest,
+)
 from vllm.exceptions import VLLMValidationError
 
 EMBEDDING_MODELS = [
@@ -31,6 +35,31 @@ step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
 @dataclass()
 class MockModelConfig:
     pooler_config: PoolerConfig
+
+
+@pytest.mark.parametrize("task", ["token_embed", "token_classify"])
+@pytest.mark.parametrize("skip_cache", [None, True, False])
+@pytest.mark.parametrize("chat", [False, True])
+def test_token_pooling_prefix_cache_opt_in(task, skip_cache, chat):
+    payload = dict(task=task, skip_reading_prefix_cache=skip_cache)
+    request = (
+        PoolingChatRequest(messages=[{"role": "user", "content": "hello"}], **payload)
+        if chat
+        else PoolingCompletionRequest(input="hello", **payload)
+    )
+    params = request.to_pooling_params()
+    params.verify(MockModelConfig(PoolerConfig(tok_pooling_type="ALL")))
+    assert params.skip_reading_prefix_cache is (skip_cache is not False)
+
+
+def test_partial_pooling_outputs_require_alignment_metadata():
+    with pytest.raises(VLLMValidationError, match="require output metadata"):
+        PoolingCompletionRequest(
+            input="hello",
+            task="token_embed",
+            skip_reading_prefix_cache=False,
+            encoding_format="bytes_only",
+        )
 
 
 @pytest.mark.parametrize(

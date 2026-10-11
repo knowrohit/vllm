@@ -494,6 +494,34 @@ class TestStepPool:
         expected = torch.tensor([[1.0, 2.0], [5.0, 6.0]])
         assert torch.equal(out[0], expected)
 
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_cached_prefix_tags_are_omitted_and_suffix_tags_align(self, chunked):
+        pooler = self._make_step_pool(chunked=chunked)
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        token_ids = [[10, 99, 10, 20, 10]]
+        params = [PoolingParams(task="token_classify", step_tag_id=10)]
+
+        def metadata(scheduled, seq_len):
+            return _make_metadata(
+                [5],
+                token_ids=token_ids,
+                pooling_params=params,
+                num_scheduled_tokens=[scheduled],
+                seq_lens=[seq_len],
+            )
+
+        final = metadata(3, 5)
+        if chunked:
+            first = metadata(2, 4)
+            assert pooler(hidden[:2], first) == [None]
+            final = metadata(1, 5)
+            final.pooling_states = first.pooling_states
+            hidden_final = hidden[2:]
+        else:
+            hidden_final = hidden
+        out = pooler(hidden_final, final)
+        assert torch.equal(out[0], hidden[[0, 2]])
+
     def test_filters_by_returned_token_ids(self):
         pooler = self._make_step_pool()
         hidden = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])

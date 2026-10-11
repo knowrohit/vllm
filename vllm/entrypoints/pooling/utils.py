@@ -42,6 +42,7 @@ class MetadataItem:
     start: int
     end: int
     shape: tuple[int, ...]
+    num_cached_tokens: int = 0
 
 
 def build_metadata_items(
@@ -111,6 +112,7 @@ def encode_pooling_bytes(
         # Dictionary form of MetadataItem
         item = dict(
             index=idx,
+            num_cached_tokens=output.num_cached_tokens,
             embed_dtype=embed_dtype,
             endianness=endianness,
             start=offset,

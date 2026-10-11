@@ -25,9 +25,19 @@ requests share a batch and on whether a read hits the prefix cache. Set
 `VLLM_BATCH_INVARIANT=1` for reads that repeat exactly, at a cost in
 throughput.
 
-Every read of a request starts with the state, so with
-`--enable-prefix-caching` the state is prefilled once and each further
-question prefills only its own text, then reads one token.
+Every read starts with the state. With `--enable-prefix-caching`, reads can
+reuse completed, token-identical prefixes and prefill only their uncached tails.
+Simultaneous cold reads may each prefill the state before any cache entry is
+available. Reuse also depends on the model's cache-hit alignment; sharing some
+text does not guarantee a hit.
+
+`diagnostics.<question>.cached_tokens` reports how many prompt tokens that read
+reused. `usage.cached_tokens` sums these counts across reads, including prefixes
+reused by multiple questions. For hybrid models, inspect the
+`vllm:cache_config_info` labels on `/metrics`, especially `hash_block_size` and
+`cache_hit_alignment_tokens`, rather than assuming a 16-token matching unit
+from the physical block size. A shared token prefix shorter than the resolved
+alignment cannot produce a hit.
 
 ## Question types
 
@@ -102,11 +112,11 @@ Response, with probabilities that depend on the model:
       "confidence": 0.65
     }
   },
-  "usage": {"input_tokens": 142, "output_tokens": 3},
+  "usage": {"input_tokens": 142, "output_tokens": 3, "cached_tokens": 0},
   "diagnostics": {
-    "team": {"label_mass": 0.93, "argmax_is_label": true},
-    "urgent": {"label_mass": 0.98, "argmax_is_label": true},
-    "tone": {"label_mass": 0.91, "argmax_is_label": true}
+    "team": {"label_mass": 0.93, "argmax_is_label": true, "cached_tokens": 0},
+    "urgent": {"label_mass": 0.98, "argmax_is_label": true, "cached_tokens": 0},
+    "tone": {"label_mass": 0.91, "argmax_is_label": true, "cached_tokens": 0}
   }
 }
 ```

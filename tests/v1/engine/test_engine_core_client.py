@@ -463,7 +463,8 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     assert cache_config.effective_attention_block_size is None
 
 
-def test_apply_ready_response_syncs_mamba_block_size():
+@pytest.mark.parametrize("hash_size,alignment", [(None, None), (16, 16), (16, 1056)])
+def test_apply_ready_response_syncs_mamba_block_size(hash_size, alignment):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -479,6 +480,8 @@ def test_apply_ready_response_syncs_mamba_block_size():
             max_model_len=8192,
             num_gpu_blocks=100,
             block_size=1056,
+            hash_block_size=hash_size,
+            cache_hit_alignment_tokens=alignment,
             dp_stats_address=None,
             dtype="bfloat16",
             vllm_version="test",
@@ -496,8 +499,15 @@ def test_apply_ready_response_syncs_mamba_block_size():
             mamba_block_size=1056,
         )
     )
+    if hash_size is None:
+        fields = msgspec.msgpack.decode(payload)
+        del fields["hash_block_size"]
+        del fields["cache_hit_alignment_tokens"]
+        payload = msgspec.msgpack.encode(fields)
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.mamba_block_size == 1056
+    assert client.vllm_config.cache_config.hash_block_size == hash_size
+    assert client.vllm_config.cache_config.cache_hit_alignment_tokens == alignment
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

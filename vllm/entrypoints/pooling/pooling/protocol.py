@@ -3,11 +3,12 @@
 import time
 from typing import Annotated, Generic, TypeAlias, TypeVar
 
-from pydantic import BeforeValidator, Field
+from pydantic import BeforeValidator, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
@@ -24,7 +25,34 @@ from ..base.protocol import (
 )
 
 
+class PoolingCacheReadRequestMixin(OpenAIBaseModel):
+    skip_reading_prefix_cache: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to skip prefix-cache reads. None uses the task default. "
+            "For token_embed and token_classify, False opts into partial outputs: "
+            "cached prefix tokens are omitted. Use num_cached_tokens in each "
+            "response item to locate the uncached suffix. This requires a causal "
+            "model with prefix caching enabled."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_prefix_cache_output_metadata(self):
+        if (
+            self.skip_reading_prefix_cache is False
+            and getattr(self, "encoding_format", None) == "bytes_only"
+        ):
+            raise VLLMValidationError(
+                "Prefix-cache reads require output metadata; use float, base64 "
+                "or bytes encoding instead of bytes_only.",
+                parameter="encoding_format",
+            )
+        return self
+
+
 class PoolingCompletionRequest(
+    PoolingCacheReadRequestMixin,
     PoolingBasicRequestMixin,
     CompletionRequestMixin,
     EmbedRequestMixin,
@@ -38,10 +66,12 @@ class PoolingCompletionRequest(
             task=self.task,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
+            skip_reading_prefix_cache=self.skip_reading_prefix_cache,
         )
 
 
 class PoolingChatRequest(
+    PoolingCacheReadRequestMixin,
     PoolingBasicRequestMixin,
     ChatRequestMixin,
     EmbedRequestMixin,
@@ -55,6 +85,7 @@ class PoolingChatRequest(
             task=self.task,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
+            skip_reading_prefix_cache=self.skip_reading_prefix_cache,
         )
 
 
@@ -103,6 +134,11 @@ class PoolingResponseData(OpenAIBaseModel):
     index: int
     object: str = "pooling"
     data: list[list[float]] | list[float] | str
+    num_cached_tokens: int = Field(
+        default=0,
+        ge=0,
+        description="Number of prompt tokens reused from the prefix cache.",
+    )
 
 
 class PoolingResponse(OpenAIBaseModel):

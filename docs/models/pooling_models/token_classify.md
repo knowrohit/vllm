@@ -1,5 +1,9 @@
 # Token Classification Usages
 
+Token classification returns full-prompt outputs by default. Applications that
+can align partial outputs may opt into prefix-cache reads as described in
+[Prefix-cache reads and partial outputs](token_embed.md#prefix-cache-reads-and-partial-outputs).
+
 ## Summary
 
 - Model Usage: token classification

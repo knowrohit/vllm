@@ -57,6 +57,7 @@ class QuestionRead:
     argmax_is_label: bool
     input_tokens: int
     output_tokens: int
+    cached_tokens: int = 0
 
 
 class ReadStrategy(ABC):
@@ -127,8 +128,9 @@ def type_label_ids(
 class NextTokenStrategy(ReadStrategy):
     """Autoregressive models. Each question is one request: the state, then the
     question with its labeled options, and the logprobs of the label tokens as
-    the reply's first token. The requests share the state. With prefix caching,
-    it is prefilled once."""
+    the reply's first token. The requests share the state. Prefix caching can
+    reuse completed, token-identical prefixes at the model's cache-hit alignment.
+    Simultaneous cold requests may still prefill the shared prefix separately."""
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
@@ -254,6 +256,7 @@ class NextTokenStrategy(ReadStrategy):
                     and output.token_ids[0] in ids,
                     input_tokens=len(label_read.result.prompt_token_ids or ()),
                     output_tokens=len(output.token_ids),
+                    cached_tokens=label_read.result.num_cached_tokens or 0,
                 )
             )
         return reads

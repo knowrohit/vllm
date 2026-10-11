@@ -104,6 +104,8 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    hash_block_size: int | None = None
+    cache_hit_alignment_tokens: int | None = None
 
 
 class EngineCoreRequest(

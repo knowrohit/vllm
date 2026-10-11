@@ -131,6 +131,9 @@ class StepPool(AllPool):
                     data = data[:, returned_token_ids]
 
                 if step_tag_id is not None:
+                    # Prefix-cache hits omit the leading hidden states. Filter
+                    # the matching suffix of token IDs, using suffix-local indices.
+                    token_id_cpu = token_id_cpu[len(token_id_cpu) - len(data) :]
                     idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
                     idx = async_tensor_h2d(idx_cpu, data.device)
                     data = data[idx]

@@ -167,6 +167,7 @@ def serving_and_engine(qwen):
                 )
             ],
             finished=True,
+            num_cached_tokens=16,
         )
 
     engine.generate.side_effect = generate
@@ -222,6 +223,8 @@ async def test_request_metadata_reaches_every_question(
     )
     response = await serving.create_decision(request, raw_request)
     assert isinstance(response, StructuredDecisionResponse)
+    assert response.usage.cached_tokens == 32
+    assert {diag.cached_tokens for diag in response.diagnostics.values()} == {16}
     engine.is_tracing_enabled.assert_not_awaited()
     assert engine.generate.call_count == 2
     for call in engine.generate.call_args_list:

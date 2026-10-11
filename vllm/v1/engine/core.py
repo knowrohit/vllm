@@ -362,6 +362,8 @@ class EngineCore:
             scheduler_block_size,
             hash_block_size,
         )
+        vllm_config.cache_config.hash_block_size = hash_block_size
+        vllm_config.cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         # The scheduler's config is a deep copy taken before these are resolved,
         # so set them there too: the KV connector's scheduler side reads the same
         # fields as its workers.
@@ -1777,6 +1779,10 @@ class EngineCoreProc(EngineCore):
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
             block_size=self.vllm_config.cache_config.block_size,
             mamba_block_size=self.vllm_config.cache_config.mamba_block_size,
+            hash_block_size=self.vllm_config.cache_config.hash_block_size,
+            cache_hit_alignment_tokens=(
+                self.vllm_config.cache_config.cache_hit_alignment_tokens
+            ),
             effective_attention_block_size=(
                 self.vllm_config.cache_config.effective_attention_block_size
             ),
