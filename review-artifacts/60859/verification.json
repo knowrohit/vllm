@@ -1,0 +1,80 @@
+{
+  "source_commit": "276fbcff2717bd934cfa37c8a2e4c391f3e7237b",
+  "patch_source": "https://github.com/vllm-project/vllm/pull/60885",
+  "local_additions": [
+    "matching BF16 acceptance regression",
+    "real DeepSeek hook ordering regression",
+    "Reyu startup model and negative variants",
+    "EngineArgs public API check"
+  ],
+  "python": "3.12.14",
+  "torch": "2.14.1+cpu",
+  "build": "VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend cpu",
+  "runtime_platform": "VLLM_TARGET_DEVICE=cpu",
+  "pytest_command": "VLLM_TARGET_DEVICE=cpu .venv/bin/python -m pytest tests/test_config.py::test_post_init_rejects_mismatched_float_kv_cache tests/test_config.py::test_post_init_validates_kv_dtype_after_model_hook -q",
+  "pytest_results": {
+    "removed-check": {
+      "exit_code": 1,
+      "summary": [
+        "1 failed, 1 passed in 0.56s"
+      ]
+    },
+    "check-before-hook": {
+      "exit_code": 1,
+      "summary": [
+        "1 failed, 1 passed in 0.57s"
+      ]
+    },
+    "fixed": {
+      "exit_code": 0,
+      "summary": [
+        "2 passed in 0.51s"
+      ]
+    }
+  },
+  "public_api_command": "PYTHONPATH=. VLLM_TARGET_DEVICE=cpu .venv/bin/python review-artifacts/60859/check_engine_args.py",
+  "pre_commit_command": ".venv/bin/pre-commit run --files vllm/config/vllm.py tests/test_config.py",
+  "pre_commit_result": "passed",
+  "reyu_version": "0.1.0-dev",
+  "reyu_command_from_reyu_root": "./reyu --output-dir pr-reyu/vllm-60859/evidence/fixed pr-reyu/vllm-60859/cache_init.ryu",
+  "reyu_bounds": {
+    "model_dtypes": [
+      "float16",
+      "bfloat16",
+      "float32"
+    ],
+    "cache_dtypes": [
+      "auto",
+      "float16",
+      "bfloat16",
+      "fp8"
+    ],
+    "normalize_bf16": [
+      false,
+      true
+    ],
+    "max_actions": 12,
+    "max_concurrent_actions": 1,
+    "crash_on_yield": false,
+    "liveness": false,
+    "deadlock_detection": false
+  },
+  "reyu_result": {
+    "verdict": "PASSED",
+    "nodes": 101,
+    "unique_states": 85
+  },
+  "reyu_negative_checks": {
+    "VALIDATE = False": "FAILED: RejectBeforeWeightLoading",
+    "CHECK_BEFORE_HOOK = True": "FAILED: RejectionUsesFinalConfig"
+  },
+  "scope": "Reyu checks the bounded abstract startup model. Python tests check actual config validation. CUDA attention execution and generation were not run.",
+  "artifacts": [
+    "cache_init.ryu",
+    "check_engine_args.py",
+    "implementation-checks.json",
+    "verification.json"
+  ],
+  "reyu_command_from_vllm_checkout_with_reyu_on_PATH": "reyu --output-dir /tmp/60859-fixed review-artifacts/60859/cache_init.ryu",
+  "raw_logs": "Retained locally under pr-reyu/vllm-60859; summaries included here."
+}

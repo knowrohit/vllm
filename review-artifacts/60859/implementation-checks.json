@@ -1,0 +1,20 @@
+{
+  "removed-check": {
+    "exit_code": 1,
+    "summary": [
+      "1 failed, 1 passed in 0.56s"
+    ]
+  },
+  "check-before-hook": {
+    "exit_code": 1,
+    "summary": [
+      "1 failed, 1 passed in 0.57s"
+    ]
+  },
+  "fixed": {
+    "exit_code": 0,
+    "summary": [
+      "2 passed in 0.51s"
+    ]
+  }
+}

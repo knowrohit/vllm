@@ -1,0 +1,83 @@
+---
+options:
+  max_actions: 12
+  max_concurrent_actions: 1
+  crash_on_yield: false
+deadlock_detection: false
+liveness: "false"
+---
+
+# Abstraction of config construction, hook normalization, and engine startup.
+# FP8 kernels have separate compatibility rules outside this model.
+VALIDATE = True
+CHECK_BEFORE_HOOK = False
+MODEL_DTYPES = ["float16", "bfloat16", "float32"]
+CACHE_DTYPES = ["auto", "float16", "bfloat16", "fp8"]
+
+action Init:
+    phase = "new"
+    model_dtype = "unset"
+    requested_cache = "unset"
+    cache_dtype = "unset"
+    normalize_bf16 = False
+    rejected = False
+    weights_loaded = False
+    attention_called = False
+
+atomic action Configure:
+    require phase == "new"
+    model_dtype = oneof MODEL_DTYPES
+    requested_cache = oneof CACHE_DTYPES
+    cache_dtype = requested_cache
+    normalize_bf16 = oneof [False, True]
+    phase = "configured"
+
+atomic action FinalizeConfig:
+    require phase == "configured"
+    if VALIDATE and CHECK_BEFORE_HOOK:
+        rejected = cache_dtype in ["float16", "bfloat16"] and cache_dtype != model_dtype
+    if normalize_bf16 and cache_dtype == "bfloat16":
+        cache_dtype = "auto"
+    if VALIDATE and not CHECK_BEFORE_HOOK:
+        rejected = cache_dtype in ["float16", "bfloat16"] and cache_dtype != model_dtype
+    phase = "rejected" if rejected else "validated"
+
+atomic action LoadWeights:
+    require phase == "validated"
+    weights_loaded = True
+    phase = "loaded"
+
+atomic action WarmupAttention:
+    require phase == "loaded"
+    attention_called = True
+    phase = "ready"
+
+always assertion RejectBeforeWeightLoading:
+    return not weights_loaded or cache_dtype not in ["float16", "bfloat16"] or cache_dtype == model_dtype
+
+always assertion AttentionDtypesCompatible:
+    return not attention_called or cache_dtype not in ["float16", "bfloat16"] or cache_dtype == model_dtype
+
+always assertion RejectionUsesFinalConfig:
+    return not rejected or (cache_dtype in ["float16", "bfloat16"] and cache_dtype != model_dtype)
+
+exists assertion RejectBF16ModelFP16Cache:
+    return rejected and model_dtype == "bfloat16" and cache_dtype == "float16"
+
+exists assertion RejectFP16ModelBF16Cache:
+    return rejected and model_dtype == "float16" and cache_dtype == "bfloat16"
+
+exists assertion MatchingBF16Runs:
+    return phase == "ready" and model_dtype == "bfloat16" and cache_dtype == "bfloat16"
+
+exists assertion MatchingFP16Runs:
+    return phase == "ready" and model_dtype == "float16" and cache_dtype == "float16"
+
+exists assertion AutoRuns:
+    return phase == "ready" and cache_dtype == "auto"
+
+exists assertion FP8PassesThisValidation:
+    return phase == "ready" and cache_dtype == "fp8"
+
+exists assertion HookCanRepairMismatch:
+    return phase == "ready" and model_dtype == "float16" and requested_cache == "bfloat16" and cache_dtype == "auto"
